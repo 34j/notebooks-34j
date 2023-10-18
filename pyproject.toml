@@ -30,6 +30,9 @@ lightning = "^2.1.0"
 torchmetrics = "^1.2.0"
 rich = "^13.6.0"
 tensorboardx = "^2.6.2.2"
+lion-pytorch = "^0.1.2"
+torch = "^2.1.0"
+torchvision = "^0.16.0"
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = ">=3"

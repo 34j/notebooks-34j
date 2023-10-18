@@ -9,6 +9,7 @@ from lightning import LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.callbacks import RichProgressBar
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.tuner.tuning import Tuner
+from lion_pytorch import Lion
 from torch.utils.data import DataLoader, random_split
 from torchmetrics import Accuracy
 from torchvision import transforms
@@ -30,7 +31,12 @@ class MNISTDataModule(LightningDataModule):
         warnings.filterwarnings(
             "ignore",
             category=UserWarning,
-            module=".*does not have many workers which may be a bottleneck.*",
+            message=".*does not have many workers.*",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            category=UserWarning,
+            message=".*Lazy modules are a.*",
         )
 
     def prepare_data(self) -> None:
@@ -71,10 +77,13 @@ class MNISTDataModule(LightningDataModule):
 
 
 class MNISTLightning(LightningModule):
-    def __init__(self, model: nn.Module, lr: float = 0.001) -> None:
+    def __init__(
+        self, model: nn.Module, lr: float = 0.001, gamma: float = 0.98
+    ) -> None:
         super().__init__()
         self.model = model
         self.lr = lr
+        self.gamma = gamma
         self.val_accuracy = Accuracy(task="multiclass", num_classes=10)
         self.test_accuracy = Accuracy(task="multiclass", num_classes=10)
 
@@ -119,16 +128,17 @@ class MNISTLightning(LightningModule):
     def configure_optimizers(
         self,
     ) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
-        optim = torch.optim.Adam(self.parameters(), lr=self.lr)
-        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=0.99)
+        # optim = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        optim = Lion(self.parameters(), lr=self.lr)
+        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.gamma)
         return [optim], [lr_scheduler]
 
 
 def train(
     model: torch.nn.Module,
     max_epochs: int = 10,
-    batch_size: int | None = 32,
-    lr: float = 0.001,
+    batch_size: int | None = None,
+    lr: float | None = 0.001,
 ) -> list[Mapping[str, float]]:
     strategy = (
         (
@@ -140,7 +150,7 @@ def train(
         else "auto"
     )
     data_module = MNISTDataModule(batch_size=batch_size or 1)
-    model = MNISTLightning(model, lr=lr)
+    model = MNISTLightning(model, lr=lr or 0.001)
     trainer = Trainer(
         max_epochs=max_epochs,
         strategy=strategy,
@@ -150,6 +160,14 @@ def train(
     )
     tuner = Tuner(trainer)
     if batch_size is None:
-        tuner.scale_batch_size(model, data_module)
+        tuner.scale_batch_size(model, data_module, steps_per_trial=1)
+        data_module.batch_size //= 2
+    if lr is None:
+        lr_finder = tuner.lr_find(model, data_module)
+        if lr_finder is not None:
+            fig = lr_finder.plot(suggest=True)
+            model.logger.experiment.add_figure("lr_finder", fig)
+        else:
+            warnings.warn("tuner.lr_find returned None", RuntimeWarning)
     trainer.fit(model, data_module)
     return trainer.test(model, data_module)
